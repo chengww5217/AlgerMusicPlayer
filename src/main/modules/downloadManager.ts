@@ -339,21 +339,24 @@ class DownloadManager {
 
   private async deleteCompleted(filePath: string): Promise<boolean> {
     try {
-      if (fs.existsSync(filePath)) {
-        try {
-          await fs.promises.unlink(filePath);
-        } catch (error) {
-          console.error('Error deleting file:', error);
+      // 直接 unlink：既省掉一次同步 stat（下载目录可能在慢速磁盘或网络挂载盘上，
+      // 同步调用会阻塞主进程），也避免 exists 之后文件被别处删除的竞态。
+      try {
+        await fs.promises.unlink(filePath);
+      } catch (error: any) {
+        // 文件本就不存在，保留记录交给 getCompleted 清理
+        if (error?.code === 'ENOENT') {
+          return false;
         }
-
-        const configStore = getStore();
-        const songInfos = (configStore.get('downloadedSongs') || {}) as Record<string, any>;
-        delete songInfos[filePath];
-        configStore.set('downloadedSongs', songInfos);
-
-        return true;
+        console.error('Error deleting file:', error);
       }
-      return false;
+
+      const configStore = getStore();
+      const songInfos = (configStore.get('downloadedSongs') || {}) as Record<string, any>;
+      delete songInfos[filePath];
+      configStore.set('downloadedSongs', songInfos);
+
+      return true;
     } catch (error) {
       console.error('Error deleting file:', error);
       return false;
@@ -370,12 +373,17 @@ class DownloadManager {
 
   private async getEmbeddedLyrics(filePath: string): Promise<string | null> {
     try {
-      if (!fs.existsSync(filePath)) return null;
+      const exists = await fs.promises
+        .access(filePath)
+        .then(() => true)
+        .catch(() => false);
+      if (!exists) return null;
 
       const ext = path.extname(filePath).toLowerCase();
 
       if (ext === '.mp3') {
-        const tags = NodeID3.read(filePath);
+        // Promise API 走异步 IO：读标签需要读入整个文件，同步读会阻塞主进程
+        const tags = await NodeID3.Promise.read(filePath);
         if (tags && tags.unsynchronisedLyrics) {
           const uslt = tags.unsynchronisedLyrics as any;
           return uslt.text || (typeof uslt === 'string' ? uslt : null);
